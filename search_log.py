@@ -43,8 +43,7 @@ class Dmesg():
         return ret
 
 
-def main(args: str) -> None:
-    logfile = args[1]
+def main(logfile: str) -> None:
 
     dmesg = Dmesg()
 
@@ -64,4 +63,4 @@ def main(args: str) -> None:
     return
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv))
+    sys.exit(main(sys.argv[1]))
