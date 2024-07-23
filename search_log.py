@@ -38,6 +38,20 @@ class Extent:
         return self.end - self.start
 
 
+class BtrfsKey:
+    """
+    Represent a btrfs key
+    """
+
+    def __init__(self, objectid: int, type: int, offset: int):
+        self.objectid = objectid
+        self.type = type
+        self.offset = offset
+
+    def __repr__(self):
+        return f'({self.objectid}, {self.type}, {self.offset})'
+
+
 class Dmesg():
     """
     Container class for a dmesg buffer.
@@ -106,6 +120,15 @@ class BtrfsDmesg(Dmesg):
             ret.append(tuple([start, end]))
         return ret
 
+    def find_btrfs_key(self) -> list[BtrfsKey]:
+        regex='key\\.objectid=(\\d+), key.type=(\\d+), key.offset=(\\d+)';
+        ret = []
+        matches = self.search_regex(regex)
+        for entry in matches:
+            key = BtrfsKey(int(entry.group(1)), int(entry.group(2)) , int(entry.group(3)))
+            ret.append(key)
+        return ret
+
     def find_btrfs_block_group_relocate(self) -> list[int]:
         regex = 'relocating block group (\\d+)'
         ret = []
@@ -121,6 +144,10 @@ def main(logfile: str) -> None:
     needle = dmesg.find_rst_lookup_error()
     print(f"RST lookup failure for {needle} (length {needle.length()})")
 
+    extent_items = dmesg.find_btrfs_key()
+    for ei in extent_items:
+        if in_range(needle.start, needle.end, ei.objectid):
+            print(f"{str(needle)} matches key={ei}")
 
     ordered_extents = dmesg.find_ordered_extent_start()
     for oe in ordered_extents:
