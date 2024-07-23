@@ -65,14 +65,14 @@ class BtrfsDmesg(Dmesg):
             end = int(entry.group(2))
             return [start, end]
 
-    def find_ordered_extent_add(self) -> list[tuple([int,int])]:
-        """ search dmesg for btrfs_ordered_extent_add() trace output """
+    def find_ordered_extent_start(self) -> list[tuple([int,int])]:
+        """ search dmesg for btrfs_ordered_extent_start() trace output """
         ret = []
-        regex='btrfs_ordered_extent_add:.*.start=(\\d+) len=(\\d+)'
+        regex='btrfs_ordered_extent_start:.*.start=(\\d+) len=(\\d+)'
         matches = self.search_regex(regex)
         for entry in matches:
             start = int(entry.group(1))
-            end = int(entry.group(2))
+            end = start + int(entry.group(2))
             ret.append(tuple([start, end]))
         return ret
 
@@ -96,7 +96,7 @@ def main(logfile: str) -> None:
     needle = tuple([start, end])
     print(f"start: {start}, end {end}, length {length}")
 
-    ordered_extents = dmesg.find_ordered_extent_add()
+    ordered_extents = dmesg.find_ordered_extent_start()
     for oe in ordered_extents:
         if range_overlaps(needle, oe):
             print(oe)
