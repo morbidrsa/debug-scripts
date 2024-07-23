@@ -8,7 +8,7 @@ def in_range(start: int, end: int, search: int) -> bool:
         return False
     if search > end:
         return False
-    return False
+    return True
 
 def range_overlaps(a: tuple([int, int]), b: tuple([int, int])) -> bool:
     """
