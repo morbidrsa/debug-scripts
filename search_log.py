@@ -120,6 +120,19 @@ class BtrfsDmesg(Dmesg):
             ret.append(tuple([start, end]))
         return ret
 
+    def find_btrfs_reserve_extent(self) -> tuple([int, Extent]):
+        """ search dmesg for btrfs_reserve_extent() trace output """
+        regex='btrfs_reserve_extent:.*.block_group=(\\d+).*.start=(\\d+) len=(\\d+)'
+        ret = []
+        matches = self.search_regex(regex)
+        for entry in matches:
+            bg = int(entry.group(1))
+            start = int(entry.group(2))
+            end = start + int(entry.group(3))
+            extent = Extent(start, end)
+            ret.append(tuple([bg, extent]))
+        return ret
+
     def find_btrfs_key(self) -> list[BtrfsKey]:
         regex='key\\.objectid=(\\d+), key.type=(\\d+), key.offset=(\\d+)';
         ret = []
@@ -163,6 +176,13 @@ def main(logfile: str) -> None:
     for bg in block_groups:
         if in_range(needle.start, needle.end, bg):
             print(f"relocated block-group: {bg} is in [{str(needle)}]")
+
+    matches = dmesg.find_btrfs_reserve_extent()
+    for m in matches:
+        e = m[1]
+        bg = m[0]
+        if range_overlaps(needle.to_tuple(), e.to_tuple()):
+            print(f"extent {e} (length {e.length()}) in block-group {bg}")
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
