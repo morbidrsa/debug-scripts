@@ -120,4 +120,8 @@ def main(logfile: str) -> None:
             print(f"relocated block-group: {bg} is in [{needle[0]}, {needle[1]}]")
 
 if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print("Usage {sys.argv[0]} logfile")
+        sys.exit(1)
+
     sys.exit(main(sys.argv[1]))
