@@ -11,7 +11,10 @@ def in_range(start: int, end: int, search: int) -> bool:
     return False
 
 def range_overlaps(a: tuple([int, int]), b: tuple([int, int])) -> bool:
-    """ Check if a range [start_a, start_b) overlaps with another range [start_b, end_b] """
+    """
+    Check if a range [start_a, start_b) overlaps with another range
+    [start_b, end_b]
+    """
     if in_range(a[0], a[1], b[0]):
         return True
     return in_range(a[0], a[1], b[1])
@@ -36,22 +39,28 @@ class Dmesg():
         line = re.sub('^\\[\\s+\\d+\\.\\d+\\] ', '', line)
         self.lines.append(line)
 
+    def search_regex(self, regex: str) -> list[re.Match]:
+        """
+        Perform a regex search on the dmesg buffer and return a list of matches.
+        """
+        matches = []
+        for line in self.lines:
+            entry = re.search(regex, line)
+            if entry:
+                matches.append(entry)
+        return matches
+
+
 class BtrfsDmesg(Dmesg):
     """
     Container class for a dmesg buffer specific to btrfs log entries.
     """
 
-    def __init__(self, logfile: str):
-        """ create dmesg from a logfile """
-        super().__init__(logfile)
-
     def find_rst_lookup_error(self) -> list[int]:
         """ search dmesg for a RAID stripe tree lookup error """
         regex = 'cannot find raid-stripe for logical \\[(\\d+), (\\d+)\\]'
-        for line in self.lines:
-            entry = re.search(regex, line)
-            if not entry:
-                continue
+        matches = self.search_regex(regex)
+        for entry in matches:
             start = int(entry.group(1))
             end = int(entry.group(2))
             return [start, end]
@@ -59,24 +68,20 @@ class BtrfsDmesg(Dmesg):
     def find_ordered_extent_add(self) -> list[tuple([int,int])]:
         """ search dmesg for btrfs_ordered_extent_add() trace output """
         ret = []
-        for line in self.lines:
-            regex='btrfs_ordered_extent_add:.*.start=(\\d+) len=(\\d+)'
-            entry = re.search(regex, line)
-            if not entry:
-                continue
+        regex='btrfs_ordered_extent_add:.*.start=(\\d+) len=(\\d+)'
+        matches = self.search_regex(regex)
+        for entry in matches:
             start = int(entry.group(1))
-            end = start +  int(entry.group(2))
+            end = int(entry.group(2))
             ret.append(tuple([start, end]))
         return ret
 
     def find_btrfs_get_extent(self) -> list[tuple([int, int])]:
         """ search dmesg for btrfs_get_extent() trace output """
+        regex='btrfs_get_extent:.*.start=(\\d+) len=(\\d+)'
         ret = []
-        for line in self.lines:
-            regex='btrfs_get_extent:.*.start=(\\d+) len=(\\d+)'
-            entry = re.search(regex, line)
-            if not entry:
-                continue
+        matches = self.search_regex(regex)
+        for entry in matches:
             start = int(entry.group(1))
             end = start + int(entry.group(2))
             ret.append(tuple([start, end]))
