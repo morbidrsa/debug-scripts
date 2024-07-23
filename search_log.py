@@ -87,6 +87,14 @@ class BtrfsDmesg(Dmesg):
             ret.append(tuple([start, end]))
         return ret
 
+    def find_btrfs_block_group_relocate(self) -> list[int]:
+        regex = 'relocating block group (\\d+)'
+        ret = []
+        matches = self.search_regex(regex)
+        for entry in matches:
+            ret.append(int(entry.group(1)))
+        return ret
+
 def main(logfile: str) -> None:
     """ main entry point of file """
     dmesg = BtrfsDmesg(logfile)
@@ -106,6 +114,10 @@ def main(logfile: str) -> None:
         if range_overlaps(needle, extent):
             print(extent)
 
+    block_groups = dmesg.find_btrfs_block_group_relocate()
+    for bg in block_groups:
+        if in_range(needle[0], needle[1], bg):
+            print(f"relocated block-group: {bg} is in [{needle[0]}, {needle[1]}]")
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv[1]))
