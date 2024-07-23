@@ -19,6 +19,25 @@ def range_overlaps(a: tuple([int, int]), b: tuple([int, int])) -> bool:
         return True
     return in_range(a[0], a[1], b[1])
 
+
+class Extent:
+    """
+    Represent an extent as (start, end) tuple
+    """
+    def __init__(self, start: int, end: int):
+        self.start = start
+        self.end = end
+
+    def __repr__(self):
+        return f'Extent({self.start}, {self.end})'
+
+    def to_tuple(self):
+        return tuple([self.start, self.end])
+
+    def length(self):
+        return self.end - self.start
+
+
 class Dmesg():
     """
     Container class for a dmesg buffer.
@@ -56,14 +75,14 @@ class BtrfsDmesg(Dmesg):
     Container class for a dmesg buffer specific to btrfs log entries.
     """
 
-    def find_rst_lookup_error(self) -> list[int]:
+    def find_rst_lookup_error(self) -> Extent:
         """ search dmesg for a RAID stripe tree lookup error """
         regex = 'cannot find raid-stripe for logical \\[(\\d+), (\\d+)\\]'
         matches = self.search_regex(regex)
         for entry in matches:
             start = int(entry.group(1))
             end = int(entry.group(2))
-            return [start, end]
+            return Extent(start, end)
 
     def find_ordered_extent_start(self) -> list[tuple([int,int])]:
         """ search dmesg for btrfs_ordered_extent_start() trace output """
@@ -99,25 +118,24 @@ def main(logfile: str) -> None:
     """ main entry point of file """
     dmesg = BtrfsDmesg(logfile)
 
-    start, end = dmesg.find_rst_lookup_error()
-    length = end - start
-    needle = tuple([start, end])
-    print(f"start: {start}, end {end}, length {length}")
+    needle = dmesg.find_rst_lookup_error()
+    print(f"RST lookup failure for {needle} (length {needle.length()})")
+
 
     ordered_extents = dmesg.find_ordered_extent_start()
     for oe in ordered_extents:
-        if range_overlaps(needle, oe):
+        if range_overlaps(needle.to_tuple(), oe):
             print(oe)
 
     extents = dmesg.find_btrfs_get_extent()
     for extent in extents:
-        if range_overlaps(needle, extent):
+        if range_overlaps(needle.to_tuple(), extent):
             print(extent)
 
     block_groups = dmesg.find_btrfs_block_group_relocate()
     for bg in block_groups:
-        if in_range(needle[0], needle[1], bg):
-            print(f"relocated block-group: {bg} is in [{needle[0]}, {needle[1]}]")
+        if in_range(needle.start, needle.end, bg):
+            print(f"relocated block-group: {bg} is in [{str(needle)}]")
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
