@@ -36,6 +36,15 @@ class Dmesg():
         line = re.sub('^\\[\\s+\\d+\\.\\d+\\] ', '', line)
         self.lines.append(line)
 
+class BtrfsDmesg(Dmesg):
+    """
+    Container class for a dmesg buffer specific to btrfs log entries.
+    """
+
+    def __init__(self, logfile: str):
+        """ create dmesg from a logfile """
+        super().__init__(logfile)
+
     def find_rst_lookup_error(self) -> list[int]:
         """ search dmesg for a RAID stripe tree lookup error """
         regex = 'cannot find raid-stripe for logical \\[(\\d+), (\\d+)\\]'
@@ -75,7 +84,7 @@ class Dmesg():
 
 def main(logfile: str) -> None:
     """ main entry point of file """
-    dmesg = Dmesg(logfile)
+    dmesg = BtrfsDmesg(logfile)
 
     start, end = dmesg.find_rst_lookup_error()
     length = end - start
