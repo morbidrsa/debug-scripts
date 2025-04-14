@@ -8,3 +8,7 @@ locate debug information on the extent.
 [task_kstack.py](task_kstack.py):
 drgn script to print the kernel stack for a given task in a crash dump or
 optionally for all tasks if the pid is omitted.
+
+[trace-ordered-extent-size.py](trace-ordered-extent-size.py):
+Extract statistics out of a ftrace run for the 'btrfs_ordered_extent_add"
+tracepoint
