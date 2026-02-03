@@ -27,6 +27,7 @@ def get_stats(extents):
     avg_size = 0
     min_size = 0
     max_size = 0
+    d = {}
 
     for oe in extents:
         if min_size == 0:
@@ -38,10 +39,14 @@ def get_stats(extents):
         if max_size < oe.dlen:
             max_size = oe.dlen
         size = size + oe.dlen
+        if oe.dlen in d:
+            d[oe.dlen] = d[oe.dlen] + 1
+        else:
+            d[oe.dlen] = 1
 
     avg_size = size / len(extents)
 
-    return (min_size, max_size, avg_size)
+    return (min_size, max_size, avg_size, dict(sorted(d.items())))
 
 
 def main():
@@ -51,7 +56,7 @@ def main():
 
     infile = open(args.infile, "r")
 
-    ordered_re = re.compile(".*.btrfs_ordered_extent_add:.*.ino=(\d+).*.start=(\d+).*.disk_len=(\d+)")
+    ordered_re = re.compile(".*.btrfs_ordered_extent_add:.*.ino=(\\d+).*.start=(\\d+).*.disk_len=(\\d+)")
 
     ino = 0
     start = 0
@@ -69,12 +74,15 @@ def main():
 
             extents.append(oe)
 
-    min_size, max_size, avg_size = get_stats(extents)
+    min_size, max_size, avg_size, d = get_stats(extents)
 
     print(f"Number of ordered extents in trace: {len(extents)}")
     print(f"Average size: {avg_size}")
     print(f"Smallest ordered extent: {min_size}")
     print(f"Biggest ordered extent: {max_size}")
+    print(f"Distribution:")
+    for k in d:
+        print(f" {k} : {d[k]}")
 
 if __name__ == '__main__':
     main()
