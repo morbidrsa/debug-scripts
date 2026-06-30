@@ -9,6 +9,9 @@ locate debug information on the extent.
 drgn script to print the kernel stack for a given task in a crash dump or
 optionally for all tasks if the pid is omitted.
 
+[blocked_kstack.py](blocked_kstack.py)
+Similar to [task_kstack.py] but only show blocked tasks
+
 [trace-ordered-extent-size.py](trace-ordered-extent-size.py):
 Extract statistics out of a ftrace run for the 'btrfs_ordered_extent_add"
 tracepoint
@@ -16,3 +19,4 @@ tracepoint
 [analyze-space_info.py](analyze-space_info.py):
 Extract statistics out of the provided dmesg dump about the space\_info debugs
 of a BTRFS filesystem mounted with `-o enospc_debug`
+
