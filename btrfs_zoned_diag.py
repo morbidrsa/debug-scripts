@@ -265,7 +265,9 @@ def dump_block_groups(fs, warns):
     meta_total = meta_active = meta_finished = 0
     sys_total = sys_active = 0
     data_total = data_active = 0
-    rows = []
+    # Keep the detail rows grouped per block-group type so DATA bgs don't get
+    # listed under the metadata heading.
+    meta_rows, sys_rows, data_rows = [], [], []
     for bg in rbtree_inorder_for_each_entry("struct btrfs_block_group",
                                             root, "cache_node"):
         flags = int(bg.flags)
@@ -280,33 +282,45 @@ def dump_block_groups(fs, warns):
         meta_like = bool(flags & (BG_METADATA | BG_SYSTEM))
         mwprel = (mwp - start) if meta_like else None
         finished = meta_like and mwprel >= cap
+        row = (start, bg_flag_str(flags), act, int(bg.used), int(bg.ro),
+               mwprel, cap, int(bg.zone_unusable), int(bg.alloc_offset),
+               bool(finished))
         if flags & BG_METADATA:
             meta_total += 1
             meta_active += 1 if act else 0
             meta_finished += 1 if finished else 0
+            meta_rows.append(row)
         elif flags & BG_SYSTEM:
             sys_total += 1
             sys_active += 1 if act else 0
+            sys_rows.append(row)
         else:
             data_total += 1
             data_active += 1 if act else 0
-        rows.append((start, bg_flag_str(flags), act, int(bg.used), int(bg.ro),
-                     mwprel, cap, int(bg.zone_unusable), int(bg.alloc_offset),
-                     bool(finished)))
+            data_rows.append(row)
     print(f"  metadata bgs: {meta_total} (active={meta_active}, "
           f"finished/mwp@end={meta_finished})   system bgs: {sys_total} "
           f"(active={sys_active})   data bgs: {data_total} (active={data_active})")
-    shown = 0
-    for (start, fl, act, used, ro, mwprel, cap, zu, aoff, finished) in rows:
-        shown += 1
-        if shown > 256:
-            print(f"      ... (truncated, {len(rows) - 256} more)")
-            break
-        tag = "ACTIVE" if act else "inactive"
-        note = "  <mwp@zone_end>" if finished else ""
-        mwp_str = hb(mwprel) if mwprel is not None else "n/a"
-        print(f"      {fl:8s} start={start} {tag} used={hb(used)} ro={ro} "
-              f"alloc_off={hb(aoff)} mwp-start={mwp_str} zone_unusable={hb(zu)}{note}")
+
+    def print_rows(label, rows, cap=256):
+        if not rows:
+            return
+        print(f"    {label}:")
+        for i, (start, fl, act, used, ro, mwprel, c, zu, aoff, finished) \
+                in enumerate(rows):
+            if i >= cap:
+                print(f"      ... (truncated, {len(rows) - cap} more)")
+                break
+            tag = "ACTIVE" if act else "inactive"
+            note = "  <mwp@zone_end>" if finished else ""
+            mwp_str = hb(mwprel) if mwprel is not None else "n/a"
+            print(f"      {fl:8s} start={start} {tag} used={hb(used)} ro={ro} "
+                  f"alloc_off={hb(aoff)} mwp-start={mwp_str} "
+                  f"zone_unusable={hb(zu)}{note}")
+
+    print_rows("metadata block groups", meta_rows)
+    print_rows("system block groups", sys_rows)
+    print_rows("data block groups", data_rows)
     if meta_total and meta_active == 0:
         warns.append("NO active metadata block group -> metadata writeback "
                      "cannot make progress")
