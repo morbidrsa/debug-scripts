@@ -20,3 +20,8 @@ tracepoint
 Extract statistics out of the provided dmesg dump about the space\_info debugs
 of a BTRFS filesystem mounted with `-o enospc_debug`
 
+[btrfs_zoned_diag.py](btrfs_zoned_diag.py)
+btrfs (zoned) first-pass diagnosis. Dumps the state most useful for triaging
+btrfs hangs/ENOSPC, with an emphasis on zoned filesystems (active zones,
+block-group zone state, metadata writeback).
+
