@@ -557,11 +557,353 @@ def scan_ebs(fs):
         print(f"      {k}: {per_bg[k]}{extra}")
 
 
+# ---- lock ownership / deadlock analysis ---------------------------------
+#
+# Two independent sources of "who holds what":
+#   1. CONFIG_LOCKDEP: task->held_locks[] gives the exact list of locks each
+#      task holds (best, but only if the kernel was built with lockdep).
+#   2. Owner fields: struct mutex.owner and struct rw_semaphore.owner encode
+#      the owning task_struct in their upper bits. These exist without lockdep
+#      (mutex always, rwsem when spin-on-owner is configured) and let us map a
+#      blocked task to the task currently holding the lock it waits on.
+#
+# From the blocked-task -> owner edges we build a wait-for graph and look for
+# cycles (classic AB-BA lock inversion). We also apply a heuristic for the
+# harder completion/bit-mediated case: a task that holds a mutex (blocking
+# others) but is itself parked in wait_for_completion()/wait_on_bit(), where
+# the thing it waits for is produced by a worker that is blocked on that very
+# mutex. That indirect cycle is exactly the btrfs zoned hang class.
+
+MUTEX_FLAGS_MASK = 0x7
+RWSEM_OWNER_FLAGS_MASK = 0x7
+RWSEM_READER_OWNED = 0x1
+
+# frame function name -> (kind, local variable holding the lock object)
+_BLOCK_FRAMES = (
+    ("mutex", ("__mutex_lock", "__mutex_lock_common", "mutex_lock",
+               "mutex_lock_nested", "__mutex_lock_slowpath"), "lock"),
+    ("rwsem", ("rwsem_down_write_slowpath", "rwsem_down_read_slowpath",
+               "down_write", "down_read", "down_write_nested",
+               "down_read_nested", "__down_write", "__down_read"), "sem"),
+    ("completion", ("wait_for_completion", "wait_for_completion_state",
+                    "wait_for_completion_io", "wait_for_completion_timeout",
+                    "wait_for_completion_killable",
+                    "wait_for_completion_interruptible",
+                    "wait_for_common", "__wait_for_common"), "x"),
+    ("folio", ("folio_wait_bit_common", "__folio_lock", "folio_lock",
+               "folio_wait_bit"), "folio"),
+    ("bit", ("__wait_on_bit", "__wait_on_bit_lock", "out_of_line_wait_on_bit",
+             "out_of_line_wait_on_bit_lock", "wait_on_bit", "wait_on_bit_io",
+             "bit_wait", "bit_wait_io"), None),
+)
+
+_WORKER_FRAMES = ("process_one_work", "worker_thread", "btrfs_work_helper")
+
+
+def _classify_frame(fname):
+    for kind, names, var in _BLOCK_FRAMES:
+        for n in names:
+            if fname == n or fname.startswith(n + "."):
+                return kind, var
+    return None, None
+
+def _atomic_long_ptr(al):
+    try:
+        return int(al.counter) & 0xFFFFFFFFFFFFFFFF
+    except Exception:
+        return 0
+
+def mutex_owner_task(lock):
+    """@lock is a 'struct mutex *'."""
+    try:
+        v = _atomic_long_ptr(lock.owner) & ~MUTEX_FLAGS_MASK
+    except Exception:
+        return None
+    if not v:
+        return None
+    try:
+        return drgn.Object(prog, "struct task_struct *", v)
+    except Exception:
+        return None
+
+def rwsem_owner_task(sem):
+    """@sem is a 'struct rw_semaphore *'. Only write owners are reliable."""
+    try:
+        raw = _atomic_long_ptr(sem.owner)
+    except Exception:
+        return None
+    if not raw or (raw & RWSEM_READER_OWNED):
+        return None
+    v = raw & ~RWSEM_OWNER_FLAGS_MASK
+    if not v:
+        return None
+    try:
+        return drgn.Object(prog, "struct task_struct *", v)
+    except Exception:
+        return None
+
+def blocked_on(task):
+    """Return {kind, obj, addr, owner} describing what @task is blocked on."""
+    try:
+        trace = prog.stack_trace(task)
+    except Exception:
+        return None
+    kind = var = None
+    for frame in trace:
+        k, v = _classify_frame(frame.name or "")
+        if k:
+            kind, var = k, v
+            break
+    if kind is None:
+        return None
+    obj = None
+    if var:
+        # Only read the lock variable from frames of the same blocking kind, so
+        # we don't accidentally pick up an unrelated spinlock named "lock".
+        for frame in trace:
+            k, _ = _classify_frame(frame.name or "")
+            if k != kind:
+                continue
+            try:
+                cand = frame[var]
+            except Exception:
+                continue
+            if cand:
+                obj = cand
+                break
+    owner = addr = None
+    if obj is not None:
+        try:
+            addr = int(obj) & 0xFFFFFFFFFFFFFFFF
+        except Exception:
+            addr = None
+        if kind == "mutex":
+            owner = mutex_owner_task(obj)
+        elif kind == "rwsem":
+            owner = rwsem_owner_task(obj)
+    return {"kind": kind, "obj": obj, "addr": addr, "owner": owner}
+
+def held_locks(task):
+    """lockdep-based held locks. Return list[(name, dep_map_addr)] or None if
+    lockdep is not available."""
+    try:
+        depth = int(task.lockdep_depth)
+    except Exception:
+        return None
+    out = []
+    if depth <= 0:
+        return out
+    try:
+        hls = task.held_locks
+    except Exception:
+        return None
+    for i in range(min(depth, 48)):
+        try:
+            inst = hls[i].instance
+        except Exception:
+            continue
+        name = "?"
+        try:
+            name = inst.name.string_().decode(errors="replace")
+        except Exception:
+            pass
+        try:
+            addr = int(inst) & 0xFFFFFFFFFFFFFFFF
+        except Exception:
+            addr = 0
+        out.append((name, addr))
+    return out
+
+def _is_worker(task):
+    try:
+        for frame in prog.stack_trace(task):
+            if (frame.name or "") in _WORKER_FRAMES:
+                return True
+    except Exception:
+        pass
+    return False
+
+def _find_cycles(edges):
+    """edges: pid -> pid (functional graph, <=1 out-edge). Return list of
+    cycles (each a list of pids)."""
+    cycles = []
+    seen = set()
+    for start in edges:
+        local = {}
+        node = start
+        path = []
+        while node in edges and node not in local:
+            local[node] = len(path)
+            path.append(node)
+            node = edges[node]
+        if node in local:
+            cyc = path[local[node]:]
+            key = tuple(sorted(cyc))
+            if key not in seen:
+                seen.add(key)
+                cycles.append(cyc)
+    return cycles
+
+def _task_label(pid, task):
+    return f"{pid}({comm_of(task)})"
+
+def _iter_all_tasks():
+    """Yield every task_struct, trying a few methods so this works across drgn
+    versions and against dumps with incomplete symbols."""
+    # 1) canonical helper
+    try:
+        from drgn.helpers.linux.pid import for_each_task
+        yielded = False
+        for t in for_each_task(prog):
+            yielded = True
+            yield t
+        if yielded:
+            return
+    except Exception:
+        pass
+    # 2) drgn Program.threads() (does not need PIDTYPE_PID)
+    try:
+        for th in prog.threads():
+            yield th.object
+        return
+    except Exception:
+        pass
+    # 3) manual walk of the init_task task list
+    try:
+        init = prog["init_task"]
+        for t in list_for_each_entry("struct task_struct",
+                                     init.tasks.address_of_(), "tasks"):
+            yield t
+    except Exception:
+        return
+
+def dump_locks_and_deadlock(warns):
+    print()
+    print("== locks / deadlock analysis ==")
+    try:
+        dtasks = [t for t in _iter_all_tasks() if state_of(t) == "D"]
+    except Exception as e:
+        print("  <could not iterate tasks:", e, ">")
+        return
+    if not dtasks:
+        print("  (no uninterruptible (D) tasks)")
+        return
+
+    # What each D task is blocked on, and (for mutex/rwsem) who owns it.
+    binfo = {}
+    for t in dtasks:
+        b = blocked_on(t)
+        if b:
+            binfo[int(t.pid)] = (t, b)
+
+    # --- held locks -------------------------------------------------------
+    lockdep_seen = False
+    lockdep_lines = []
+    for t in dtasks:
+        hl = held_locks(t)
+        if hl is None:
+            continue
+        lockdep_seen = True
+        if hl:
+            names = ", ".join(n for n, _ in hl)
+            lockdep_lines.append(f"    pid={int(t.pid)} {comm_of(t):16s} "
+                                 f"holds: {names}")
+
+    print("  held locks:")
+    if lockdep_seen:
+        if lockdep_lines:
+            for line in lockdep_lines:
+                print(line)
+        else:
+            print("    (no D task holds a tracked lock)")
+    else:
+        # No lockdep: infer holders from the owner fields of contended locks.
+        print("    (CONFIG_LOCKDEP off; inferring from contended lock owners)")
+        shown = set()
+        for pid, (t, b) in binfo.items():
+            owner = b.get("owner")
+            if not owner:
+                continue
+            try:
+                opid = int(owner.pid)
+            except Exception:
+                continue
+            key = (opid, b.get("addr"))
+            if key in shown:
+                continue
+            shown.add(key)
+            addr = hex(b["addr"]) if b.get("addr") else "?"
+            print(f"    pid={opid} {comm_of(owner):16s} holds {b['kind']} "
+                  f"{addr} (contended by pid={pid})")
+        if not shown:
+            print("    (no ownable contended locks found)")
+
+    # --- blocked-on -------------------------------------------------------
+    print("  blocked-on:")
+    edges = {}
+    for pid, (t, b) in binfo.items():
+        line = f"    pid={pid} {comm_of(t):16s} blocked on {b['kind']}"
+        if b.get("addr"):
+            line += f" @ {hex(b['addr'])}"
+        owner = b.get("owner")
+        if owner:
+            try:
+                opid = int(owner.pid)
+                edges[pid] = opid
+                line += f" held by pid={opid} {comm_of(owner)}"
+            except Exception:
+                pass
+        print(line)
+
+    # --- deadlock detection ----------------------------------------------
+    found = False
+
+    # (a) hard lock-ownership cycles (AB-BA on mutex/rwsem).
+    for cyc in _find_cycles(edges):
+        found = True
+        chain = " -> ".join(_task_label(p, binfo[p][0]) for p in cyc)
+        first = cyc[0]
+        chain += f" -> {_task_label(first, binfo[first][0])}"
+        msg = f"DEADLOCK (lock ownership cycle): {chain}"
+        print("  [!]", msg)
+        warns.append(msg)
+
+    # (b) completion/bit-mediated indirect deadlock: a lock holder that is
+    #     itself parked in a wait that only a blocked-on-it worker can satisfy.
+    owners = set(edges.values())
+    for opid in owners:
+        if opid not in binfo:
+            continue
+        ot, ob = binfo[opid]
+        if ob["kind"] not in ("completion", "bit", "folio"):
+            continue
+        waiters = [p for p, o in edges.items() if o == opid]
+        workers = [p for p in waiters if _is_worker(binfo[p][0])]
+        found = True
+        msg = (f"DEADLOCK (likely): pid={_task_label(opid, ot)} holds a lock "
+               f"blocking pid(s) {waiters}, but is itself parked in "
+               f"{ob['kind']}")
+        if ob["kind"] == "completion" and workers:
+            msg += (f"; that completion is signalled by worker pid(s) {workers}, "
+                    f"which are blocked on the lock pid={opid} holds "
+                    f"-> completion-mediated cycle")
+        elif ob["kind"] == "bit":
+            msg += (" (waking that bit needs forward progress that the blocked "
+                    "waiters cannot make)")
+        print("  [!]", msg)
+        warns.append(msg)
+
+    if not found:
+        print("  no lock cycle detected among D tasks (they may be waiting on "
+              "I/O or an external event)")
+
+
 # ---- main ---------------------------------------------------------------
 
 def main():
     warns = []
     dump_global(warns)
+    dump_locks_and_deadlock(warns)
     for sb, bdi in iter_btrfs_sbs():
         fs = drgn.cast("struct btrfs_fs_info *", sb.s_fs_info)
         try:
